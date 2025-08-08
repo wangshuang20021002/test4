@@ -1,97 +1,14 @@
 # Test-Agnostic Long-Tailed Recognition  
 
-This repository is the official Pytorch implementation of [Self-Supervised Aggregation of Diverse Experts for Test-Agnostic Long-Tailed Recognition](https://arxiv.org/pdf/2107.09249.pdf) (NeurIPS 2022).
-* SADE (our method) innovates the expert training scheme by introducing diversity-promoting expertise-guided losses, which train different experts to handle distinct class distributions. In this way, the learned  experts would be  more diverse than  existing multi-expert methods, leading to  better ensemble performance, and aggregatedly simulate a wide spectrum of possible  class distributions. 
-* SADE develops a new self-supervised method, namely prediction stability maximization,   to adaptively aggregate these experts for better handling unknown test distribution, using unlabeled test class data.
+This repository is the official Pytorch implementation of [Breaking Long-Tailed Learning Bottlenecks: A Controllable Paradigm with Hypernetwork-Generated Diverse Experts](https://openreview.net/pdf?id=WpPNVPAEyv) (NeurIPS 2024).
 
-<p align="center">
-<img src="figure.png" weight=800>
-</p>
-
-## 1. Results 
-### (1) ImageNet-LT (ResNeXt-50)
-Long-tailed recognition with uniform test class distribution:
-
-|    Methods   |  MACs(G) | Top-1 acc. |   Model  |  
-| :------------: | :--------: | :----------: | :--------: |
-|    Softmax   |   4.26   |    48.0    |          |
-|     RIDE     |   6.08   |    56.3    |          |
-|  SADE (ours) |   6.08   |    58.8    |          | 
-
-Test-agnostic long-tailed recognition:
-
-|    Methods   |  MACs(G) | Forward-50 | Forward-10 |  Uniform  | Backward-10 | Backward-50 |      
-| :------------: | :--------: | :--------: | :--------: |  :--------: |  :--------: |  :--------: |
-|    Softmax   |   4.26   |    66.1    |    60.3    |    48.0   |    34.9     |    27.6     |   
-|     RIDE     |   6.08   |    67.6    |    64.0    |    56.3   |    48.7     |    44.0     |    
-|  SADE (ours) |   6.08   |    69.4    |    65.4    |    58.8   |    54.5     |    53.1     |   
-
-
-### (2) CIFAR100-Imbalance ratio 100 (ResNet-32)
-Long-tailed recognition with uniform test class distribution： 
-
-|    Methods   |  MACs(G) | Top-1 acc. |
-|  :--------: |  :--------: |  :--------: |
-|    Softmax   |   0.07   |    41.4    |
-|     RIDE     |   0.11   |    48.0    |
-|  SADE (ours) |   0.11   |    49.8    |
-
-Test-agnostic long-tailed recognition： 
-
-|    Methods   |  MACs(G) | Forward-50 | Forward-10 |  Uniform  | Backward-10 | Backward-50 |      
-|  :--------: |  :--------: | :--------: |  :--------: | :--------: | :--------: | :--------: |
-|    Softmax   |   0.07   |    62.3    |    56.2    |    41.4   |    25.8     |    17.5     |   
-|     RIDE     |   0.11   |    63.0    |    57.0    |    48.0   |    35.4     |    29.3     |    
-|  SADE (ours) |   0.11   |    65.9    |    58.3    |    49.8   |    43.9     |    42.4     |    
-
-
-### (3) Places-LT (ResNet-152)
-Long-tailed recognition with uniform test class distribution:
- 
-|    Methods   |  MACs(G) | Top-1 acc. |
-|  :--------: | :--------: | :--------: |
-|    Softmax   |  11.56   |    31.4    |
-|     RIDE     |  13.18   |    40.3    |
-|  SADE (ours) |  13.18   |    40.9    |
-
-Test-agnostic long-tailed recognition:
-
-|    Methods   |  MACs(G) | Forward-50 | Forward-10 |  Uniform  | Backward-10 | Backward-50 |      
-|  :--------: |  :--------: | :--------: |  :--------: | :--------: | :--------: | :--------: |
-|    Softmax   |  11.56   |    45.6    |    40.2    |    31.4   |     23.4    |    19.4     |   
-|     RIDE     |  13.18   |    43.1    |    41.6    |    40.3   |     38.2    |    36.9     |    
-|  SADE (ours) |  13.18   |    46.4    |    43.3    |    40.9   |     41.4    |    41.6     |    
-
-
-### (4) iNaturalist 2018 (ResNet-50)
-Long-tailed recognition with uniform test class distribution: 
-
-|    Methods   |  MACs(G) | Top-1 acc. |
-|  :--------: | :--------: | :--------: |
-|    Softmax   |   4.14   |    64.7    |
-|     RIDE     |   5.80   |    71.8    |
-|  SADE (ours) |   5.80   |    72.9    |
-
-Test-agnostic long-tailed recognition: 
-
-|    Methods   |  MACs(G) | Forward-3 | Forward-2 |  Uniform  | Backward-2 | Backward-3 |      
-|  :--------: |  :--------: | :--------: |  :--------: | :--------: | :--------: | :--------: |
-|    Softmax   |   4.14   |   65.4    |   65.5    |    64.7   |    64.0    |    63.4    |   
-|     RIDE     |   5.80   |   71.5    |   71.9    |    71.8   |    71.9    |    71.8    |    
-|  SADE (ours) |   5.80   |   72.3    |   72.5    |    72.9   |    73.5    |    73.3    |   
- 
-
-
-## 2. Requirements
+## 1. Requirements
 * To install requirements: 
 ```
 pip install -r requirements.txt
 ```
 
-* Hardware requirements
-8 GPUs with >= 11G GPU RAM are recommended. Otherwise the model with more experts may not fit in, especially on datasets with more classes (the FC layers will be large). We do not support CPU training, but CPU inference could be supported by slight modification.
-
-## 3. Datasets
+## 2. Datasets
 ### (1) Four bechmark datasets 
 * Please download these datasets and put them to the /data file.
 * ImageNet-LT and Places-LT can be found at [here](https://drive.google.com/drive/u/1/folders/1j7Nkfe6ZhzKFXePHdsseeeGI877Xu1yf).
@@ -161,12 +78,7 @@ data_txt
 ```
 
 
-## 4. Pretrained models
-* For the training on Places-LT, we follow previous methods and use [the pre-trained ResNet-152 model](https://github.com/zhmiao/OpenLongTailRecognition-OLTR).
-* Please download the checkpoint. Unzip and move the checkpoint files to /model/pretrained_model_places/.
-
-
-## 5. Script
+## 3. Script
 
 ### (1) ImageNet-LT
 #### Training
@@ -269,18 +181,20 @@ python test_all_inat.py -r checkpoint_path
 python test_training_inat.py -c configs/test_time_iNaturalist_resnet50_sade.json -r checkpoint_path
 ``` 
 
-## 6. Citation
+## 4. Citation
 If you find our work inspiring or use our codebase in your research, please cite our work.
 ```
-@inproceedings{zhang2022Self,
-  title={Self-Supervised Aggregation of Diverse Experts for Test-Agnostic Long-Tailed Recognition},
-  author={Zhang, Yifan and Hooi, Bryan and Hong, Lanqing and Feng, Jiashi},
-  booktitle={Advances in Neural Information Processing Systems},
-  year={2022}
+@article{zhao2024breaking,
+  title={Breaking Long-Tailed Learning Bottlenecks: A Controllable Paradigm with Hypernetwork-Generated Diverse Experts},
+  author={Zhao, Zhe and Wen, HaiBin and Wang, Zikang and Wang, Pengkun and Wang, Fanfu and Lai, Song and Zhang, Qingfu and Wang, Yang},
+  journal={Advances in Neural Information Processing Systems},
+  volume={37},
+  pages={7493--7520},
+  year={2024}
 }
 ``` 
 
-## 7. Acknowledgements
+## 5. Acknowledgements
 This is a project based on this [pytorch template](https://github.com/victoresque/pytorch-template). 
 
 The mutli-expert framework are based on [RIDE](https://github.com/frank-xwang/RIDE-LongTailRecognition). The data generation of agnostic test class distributions takes references from [LADE](https://github.com/hyperconnect/LADE).
