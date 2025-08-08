@@ -16,7 +16,7 @@ Long-tailed recognition with uniform test class distribution:
 | :------------: | :--------: | :----------: | :--------: |
 |    Softmax   |   4.26   |    48.0    |          |
 |     RIDE     |   6.08   |    56.3    |          |
-|  SADE (ours) |   6.08   |    58.8    | [Download](https://drive.google.com/file/d/1xr6RpXlYOt_SetIbonVAVenf5GyNrR1W/view?usp=sharing) | 
+|  SADE (ours) |   6.08   |    58.8    |          | 
 
 Test-agnostic long-tailed recognition:
 
@@ -189,7 +189,7 @@ python test_all_imagenet.py -r checkpoint_path
 #### Test-time training
 * To test-time train the expertise-diverse model for agnostic test class distributions, run:
 ``` 
-python test_train_imagenet.py -c configs/test_time_imagenet_lt_resnext50_sade.json -r checkpoint_path
+python test_training_imagenet.py -c configs/test_time_imagenet_lt_resnext50_sade.json -r checkpoint_path
 ``` 
 
 
@@ -216,7 +216,7 @@ python test_all_cifar.py -r checkpoint_path
 #### Test-time training
 * To test-time train the expertise-diverse model for agnostic test class distributions, run:
 ``` 
-python test_train_cifar.py -c configs/test_time_cifar100_ir100_sade.json -r checkpoint_path
+python test_training_cifar.py -c configs/test_time_cifar100_ir100_sade.json -r checkpoint_path
 ``` 
 * One can change the imbalance ratio from 100 to 10/50 by changing the config file.
  
@@ -242,7 +242,7 @@ python test_all_places.py -r checkpoint_path
 #### Test-time training
 * To test-time train the expertise-diverse model for agnostic test class distributions, run:
 ``` 
-python test_train_places.py -c configs/test_time_places_lt_resnet152_sade.json -r checkpoint_path
+python test_training_places.py -c configs/test_time_places_lt_resnet152_sade.json -r checkpoint_path
 ``` 
 
 ### (4) iNaturalist 2018
@@ -266,7 +266,7 @@ python test_all_inat.py -r checkpoint_path
 #### Test-time training
 * To test-time train the expertise-diverse model for agnostic test class distributions, run:
 ``` 
-python test_train_inat.py -c configs/test_time_iNaturalist_resnet50_sade.json -r checkpoint_path
+python test_training_inat.py -c configs/test_time_iNaturalist_resnet50_sade.json -r checkpoint_path
 ``` 
 
 ## 6. Citation
