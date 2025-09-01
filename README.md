@@ -401,233 +401,131 @@ $$
 
 ## 9. 训练主循环（频域伪代码，PyTorch 风格）
 
-```python
-# x_list: [B, K+1, L]  —— 已对齐与重标定（§2.1/2.2）；
-# mask_peak, mask_base: [B, L]；s_hat: [B, L]（§3.1）
+1) 模型设定
+1.1 潜在子组与随机效应
 
-for epoch in range(num_epochs):
-    for x_list, mask_peak, mask_base, s_hat in loader:
-        x0 = x_list[:, 0, :]          # 低SNR输入
-        y0 = model(x0)                # 去噪输出
+子组：对每个个体 i，引入潜在子组记号 δ_i ∈ {1, 2, 3}。
 
-        # 峰/基线加权
-        w_peak, w_base = 6.0, 1.0
-        W = w_base*mask_base + w_peak*mask_peak
+随机效应：给定子组 k，随机效应 b_i ~ Normal(mean = μ_k, var = σ_b^2)。三个子组均值不同（μ_1, μ_2, μ_3），但随机效应方差共享 σ_b^2。
 
-        # 重建 + 一阶导数
-        L_rec   = (W * (y0 - s_hat).abs()).mean()
+1.2 子组概率（多项逻辑回归）
 
-        def diff1(z): return z[..., 1:] - z[..., :-1]
-        L_deriv = (diff1(y0) - diff1(s_hat)).abs().mean()
+用与分组相关的协变量 U_i 通过多项 Logistic 模型定义隶属概率：
+P(δ_i = k | U_i) = exp(U_i · γ_k) / Σ_{m=1..3} exp(U_i · γ_m)，k = 1,2,3。
 
-        # 基线二阶差分（仅在B内）
-        def diff2(z): return z[..., 2:] - 2*z[..., 1:-1] + z[..., :-2]
-        L_curv  = (diff2(y0) * mask_base[..., 1:-1]).abs().mean()
+上式允许不同个体因 U_i 的差异而有不同的子组概率。
 
-        # 多SNR一致性（随机采 1-2 条高SNR作为对照）
-        y_all = []
-        idxs = sample_indices_from_1_to_K(x_list.shape[1])
-        for j in idxs:
-            y_all.append(model(x_list[:, j, :]))
-        L_cons = 0.0
-        if len(y_all) >= 2:
-            cnt = 0
-            for i in range(len(y_all)):
-                for j in range(i+1, len(y_all)):
-                    L_cons += (y_all[i] - y_all[j]).abs().mean()
-                    cnt += 1
-            L_cons /= max(1, cnt)
+补充视角：也可把 b 的边际分布写为有限混合：g(b) = Σ_{k=1..3} p_k · g_k(b)，其中 g_k 为以 μ_k、σ_b^2 的正态密度，p_k 为权重；若采用多项 Logistic，上述 p_k 由 U_i 驱动。
 
-        # 残差比例软约束（在基线区）
-        eps = 1e-8
-        L_T = 0.0; cnt = 0
-        for i in range(len(y_all)):
-            for j in range(i+1, len(y_all)):
-                ri = (x_list[:, i+1, :] - y_all[i]) * mask_base
-                rj = (x_list[:, j+1, :] - y_all[j]) * mask_base
-                num = (ri.pow(2).sum(dim=-1).sqrt() + eps)
-                den = (rj.pow(2).sum(dim=-1).sqrt() + eps)
-                ratio = num / den
-                alpha = (T ** (-(j - i))) * torch.ones_like(ratio)
-                L_T += ( (ratio+eps).log() - (alpha+eps).log() ).abs().mean()
-                cnt += 1
-        L_T /= max(1, cnt)
+1.3 观测模型（纵向/重复测量）
 
+设第 i 个体有 t 次观测，固定效应设计矩阵 W_i ∈ R^{t×p}，固定效应参数 α ∈ R^p，1 表示 t 维全 1 列向量。
 
+观测向量 y_i 满足
+y_i = W_i α + 1 · b_i + ε_i， 其中 ε_i ~ Normal(mean = 0, cov = σ_ε^2 · R)。
+这里 R 是 t×t 的工作相关矩阵（平衡数据场景下 R 为对称，且 (R^{-1})^T = R^{-1}）。随机效应 b_i 与误差 ε_i 独立。
 
+联合分布：在给定 δ_i、U_i、W_i 下，(y_i, b_i) 联合正态。
+Var(y_i) = Σ = 1 σ_b^2 1^T + σ_ε^2 R；Cov(y_i, b_i) = B = 1 σ_b^2。
+从而
+E[b_i | y_i, δ_i = k] = μ_k + B^T Σ^{-1} (y_i − W_i α − 1 μ_k)，
+Var[b_i | y_i, δ_i] = σ_b^2 − B^T Σ^{-1} B。
 
+2) 参数估计与分组（EM 算法）
 
-# 3.模型介绍
+将 (b_i, δ_i) 视为缺失数据，整体参数记为
+θ = (γ_1, γ_2, γ_3, μ_1, μ_2, μ_3, α, σ_ε^2, σ_b^2, R)。
 
-# 3.1 模型设定
+2.1 完全数据对数似然（结构）
 
-本文主要研究三个子组的分组情况，以 $\delta _ { i }$ 表示子组个数且 $\delta _ { i } \in \{ 1 , 2 , 3 \}$ 。随机效应 $b _ { i }$ 的协方差矩阵为 $\sigma _ { b } ^ { 2 }$ ， $\delta _ { i } = 1$ 对应随机效应 $b _ { i }$ 的均值为 $\mu _ { 1 }$ ， $\delta _ { i } = 2$ 对应随机效应 $b _ { i }$ 的均值为 $\mu _ { 2 }$ ，当$\delta _ { i } = 3$ 对应随机效应 $b _ { i }$ 的均值为 $\mu _ { 3 }$ 。此时对应子组的概率如下：
+由三部分相加：
+(a) 子组隶属的多项 Logistic 似然；
+(b) 条件于 b_i 的 y_i 的多元正态密度；
+(c) 条件于子组的 b_i 的正态密度。
 
-$$
-P ( \delta _ { i } = k | U _ { i } ) = \frac { e ^ { U _ { i } \gamma _ { k } } } { \sum _ { k = 1 } ^ { 3 } e ^ { U _ { i } \gamma _ { k } } } , k = 1 , 2 , 3
-$$
+2.2 E 步（计算“软分配”与 b 的后验）
 
-各子组的概率分别如下：
+计算后验子组概率（responsibility）：
+P_i k = P(δ_i = k | y_i; θ^{(j)})
+= [ π(U_i γ_k^{(j)}) · Normal(y_i ; mean = W_i α^{(j)} + 1 μ_k^{(j)}, cov = Σ^{(j)}) ]
+/ Σ_{m=1..3} [ π(U_i γ_m^{(j)}) · Normal(y_i ; W_i α^{(j)} + 1 μ_m^{(j)}, Σ^{(j)}) ]。
 
-$$
-\begin{array} { l } { P ( \delta _ { i } = 1 | U _ { i } ) = \displaystyle \frac { e ^ { U _ { i } \gamma _ { 1 } } } { e ^ { U _ { i } \gamma _ { 1 } } + e ^ { U _ { i } \gamma _ { 2 } } + e ^ { U _ { i } \gamma _ { 3 } } } } \\ { P ( \delta _ { i } = 2 | U _ { i } ) = \displaystyle \frac { e ^ { U _ { i } \gamma _ { 2 } } } { e ^ { U _ { i } \gamma _ { 1 } } + e ^ { U _ { i } \gamma _ { 2 } } + e ^ { U _ { i } \gamma _ { 3 } } } } \\ { P ( \delta _ { i } = 3 | U _ { i } ) = \displaystyle \frac { e ^ { U _ { i } \gamma _ { 3 } } } { e ^ { U _ { i } \gamma _ { 1 } } + e ^ { U _ { i } \gamma _ { 2 } } + e ^ { U _ { i } \gamma _ { 3 } } } } \end{array}
-$$
+计算每个子组下的 b 的后验均值与方差：
+b_hat_{ik} = E[b_i | y_i, δ_i = k]； var_b_hat = Var[b_i | y_i, δ_i]（与上节公式一致）。
 
-# 3.1.4 潜在子组条件模型
+将 Q(θ, θ^{(j)}) 写为 I1 + I2 + I3 的和，I1 对应 Logistic 部分，I2 为 y|b 的二次型项，I3 为 b 的正态项。
 
-为简化分析过程，本文只考虑个体间异质性造成的随机效应，不针对个体内异质性进一步分析。引入潜在子组 $\delta _ { i }$ ，考虑三个子组的情况即 $| \delta _ { i } \in \{ 1 , 2 , 3 \}$ ，潜在子组可以通过与分组相关的协变量 $U _ { i }$ 的逻辑回归构建模型，并将随机效应看作是来自三个均值不同，方差相同的正态分布即 $b _ { i } { \sim } N ( \mu _ { k } , \sigma _ { b } ^ { 2 } )$ ，则随机效应的有限混合分布：
+2.3 M 步（更新参数）
 
-$$
-g ( b ) = \sum _ { k = 1 } ^ { 3 } p _ { k } g _ { k } ( b )
-$$
+子组隶属参数 γ_1, γ_2, γ_3：
+最大化加权的多项 Logistic 对数似然：Σ_i [ P_i1 log π(U_i γ_1) + P_i2 log π(U_i γ_2) + P_i3 log π(U_i γ_3) ]。
 
-其中， $\begin{array} { r } { g _ { k } ( b ) = \frac { 1 } { \sqrt { 2 \pi \sigma _ { b } ^ { 2 } } } e x p \left[ - \frac { ( b - \mu _ { k } ) ^ { 2 } } { 2 \sigma _ { b } ^ { 2 } } \right] \circ } \end{array}$ 与混合子组相对应的比例为常数 ${ \cdot } p _ { k } \ge 0 ( k = 1 , 2 , 3 )$ ，且满足 $\begin{array} { r } { \sum _ { k = 1 } ^ { 3 } p _ { k } = 1 } \end{array}$ 。引入潜在子组 $\delta _ { i }$ 的条件模型矩阵形式如下：
+子组均值 μ_k（k=1,2,3）：
+μ_k ← (Σ_i P_i k · b_hat_{ik}) / (Σ_i P_i k)。
 
-$$
-y _ { i } | ( \delta _ { i } , U _ { i } , W _ { i } , b _ { i } ) = \left( \begin{array} { c c c c } { W _ { i 1 1 } } & { W _ { i 1 2 } } & { \cdots } & { W _ { i 1 p } } \\ { W _ { i 2 1 } } & { W _ { i 2 2 } } & { \cdots } & { W _ { i 2 p } } \\ { \vdots } & { \vdots } & { \vdots } \\ { W _ { i t 1 } } & { W _ { i t 2 } } & { \cdots } & { W _ { i t p } } \end{array} \right) \left( \begin{array} { c } { \alpha _ { 1 } } \\ { \alpha _ { 2 } } \\ { \vdots } \\ { \alpha _ { p } } \end{array} \right) + \left( \begin{array} { c } { 1 } \\ { 1 } \\ { \vdots } \\ { 1 } \end{array} \right) b _ { i } + \left( \begin{array} { c } { \varepsilon _ { i 1 } } \\ { \varepsilon _ { i 2 } } \\ { \vdots } \\ { \varepsilon _ { i t } } \end{array} \right)
-$$
+固定效应 α（广义最小二乘形式）：
+记 M = N·t。更新式可写成
+α ← (Σ_i Σ_k W_i^T R^{-1} W_i)^{-1} · (Σ_i Σ_k P_i k · W_i^T R^{-1} (y_i − 1·b_hat_{ik}))。
 
-令 $W _ { i } = \left( \begin{array} { c c c c } { W _ { i 1 1 } } & { W _ { i 1 2 } } & { \cdots } & { W _ { i 1 p } } \\ { W _ { i 2 1 } } & { W _ { i 2 2 } } & { \cdots } & { W _ { i 2 p } } \\ { \vdots } & { \vdots } & { } & { \vdots } \\ { W _ { i t 1 } } & { W _ { i t 2 } } & { \cdots } & { W _ { i t p } } \end{array} \right)$ 表示固定效应的设计矩阵， $W _ { i } \in R ^ { t \times p }$ ； $\alpha =$ $( \alpha _ { 1 } , \alpha _ { 2 } , \cdots , \alpha _ { q } ) ^ { T }$ 表示固定效应， $\alpha \in R ^ { p \times 1 }$ ；随机效应 $b _ { i } { \sim } N ( \mu _ { k } , \sigma _ { b } ^ { 2 } )$ ； $\varepsilon _ { i t }$ 表示随机误差且$\varepsilon _ { i t } { \sim } N ( 0 , \sigma _ { \varepsilon } ^ { 2 } )$ ，令 $\mathbf { \Psi } ^ { \cdot } \varepsilon _ { i } = ( \varepsilon _ { i 1 } , \varepsilon _ { i 2 } , \cdots , \varepsilon _ { i t } ) ^ { T }$ ，则 $\varepsilon _ { i } { \sim } N ( 0 , \sigma _ { \varepsilon } ^ { 2 } R )$ 。 $\mathbf { 1 } = ( 1 , 1 , \cdots , 1 ) ^ { T }$ 表示元素全为1 的$t$ 维列向量， $R _ { t \times t }$ 表示 $\mathbf { \boldsymbol { t } } \times \mathbf { \boldsymbol { t } }$ 维工作相关矩阵。本文仅考虑平衡数据的情况，此时的工作相关矩阵为对称矩阵即 $R ^ { T } = R$ ，且 $( R ^ { - 1 } ) ^ { T } = R ^ { - 1 }$ 。随机效应与随机误差不存在相关性，彼此之间相互独立，此时潜在子组条件模型一般形式如下：
+方差分量：
+σ_b^2 ← (1/N) · Σ_i Σ_k P_i k [ (b_hat_{ik} − μ_k)^2 + var_b_hat ]。
+σ_ε^2 ← (1/M) · Σ_i Σ_k P_i k [ (y_i − W_i α − 1·b_hat_{ik})^T R^{-1} (y_i − W_i α − 1·b_hat_{ik}) ]
 
-$$
-y _ { i } | ( \delta _ { i } , U _ { i } , W _ { i } , b _ { i } ) = W _ { i } \alpha + { \bf 1 } b _ { i } + \varepsilon _ { i } , i = 1 , 2 , \dots , N
-$$
+(1/M) · tr( R^{-1} · 1 var_b_hat 1^T )。
 
-在 $\delta _ { i } , U _ { i } , W _ { i }$ 的条件下， $y _ { i }$ 和 $b _ { i }$ 联合正态分布如下：
+工作相关矩阵 R：
+R ← (1 / (N · σ_ε^2)) · Σ_i Σ_k P_i k [ (y_i − W_i α − 1·b_hat_{ik})(同上)^T + 1 var_b_hat 1^T ]。
 
-$$
-\binom { y _ { i } } { b _ { i } } \sim N \left( \left[ \begin{array} { c c } { W _ { i } \alpha + \mathbf { 1 } \mu _ { i } } \\ { \mu _ { i } } \end{array} \right] , \left[ \begin{array} { c c } { \Sigma } & { B } \\ { B ^ { T } } & { \sigma _ { b } ^ { 2 } } \end{array} \right] _ { ( t + 1 ) \times ( t + 1 ) } \right)
-$$
+2.4 个体分组与解释
 
-$$
-\begin{array} { c } { \mu _ { i } = \mu _ { 1 } I ( \delta _ { i } = 1 ) + \mu _ { 2 } I ( \delta _ { i } = 2 ) + \mu _ { 3 } I ( \delta _ { i } = 3 ) } \\ { V a r ( y _ { i } ) = \Sigma = \mathbf { 1 } \sigma _ { b } ^ { 2 } \mathbf { 1 } ^ { T } + \sigma _ { \varepsilon } ^ { 2 } R _ { t \times t } } \\ { B = \mathbf { 1 } \sigma _ { b } ^ { 2 } } \\ { B ^ { T } = \sigma _ { b } ^ { 2 } \mathbf { 1 } ^ { T } } \end{array}
-$$
+软分配：用 P_i k 表示 i 属于子组 k 的后验概率。
 
-根据高斯联合分布的条件期望与条件方差公式，给定 $U _ { i } , W _ { i }$ 且在 $y _ { i }$ 和 $\delta _ { i }$ 的条件下随机效应 $b _ { i }$ 的后验均值为
+硬分配：将个体 i 归入 argmax_k P_i k 的子组；并可汇报各子组规模、均值 μ_k 与方差分量等。
 
-$$
-\hat { b } _ { i } = E ( b _ { i } | y _ { i } , \delta _ { i } ) = \mu _ { i } + B ^ { T } \Sigma ^ { - 1 } ( y _ { i } - W _ { i } \alpha - \mathbf { 1 } \mu _ { i } )
-$$
+3) 模型检验与不确定性评估
+3.1 协变量显著性（多项 Logistic 的似然比检验）
 
-对于每个子组 $k = 1 , 2 , 3$ 时，随机效应 $b _ { i k }$ 的后验均值为
+目的：验证与子组概率相关的协变量是否显著。
 
-$$
-\hat { b } _ { i k } = E ( b _ { i } | y _ { i } , \delta _ { i } = k ) = \mu _ { k } + B ^ { T } \Sigma ^ { - 1 } ( y _ { i } - W _ { i } \alpha - \mathbf { 1 } \mu _ { k } )
-$$
+方法：比较“完整模型”（使用全部 U_i）与“简化模型”（只用 U_i* 的子集）的对数似然：
+LR = 2 · ( loglik_full − loglik_reduced ) ≈ 逐步服从 χ^2，自由度为两模型协变量参数个数之差。
 
-给定 $U _ { i } , W _ { i }$ 且在 $y _ { i }$ 和 $\delta _ { i }$ 的条件下随机效应 $b _ { i }$ 的后验方差为
+loglik_full 与 loglik_reduced 都基于 EM 估计的 (γ_k, α, μ_k, Σ) 计算，且 Σ = 1 σ_b^2 1^T + σ_ε^2 R。
 
-$$
-\hat { \sigma } _ { b } ^ { 2 } = C o v ( b _ { i } | y _ { i } , \delta _ { i } ) = \sigma _ { b } ^ { 2 } - B ^ { T } \Sigma ^ { - 1 } B
-$$
+3.2 标准误差与观测 Fisher 信息（Louis 方法）
 
-此外，给定 $U _ { i } , W _ { i }$ 且在 $y _ { i }$ 和 $\delta _ { i }$ 的条件下随机效应的二阶矩 $b _ { i } b _ { i } ^ { T }$ 的后验估计为
+在 EM 框架下，可用 Louis (1982) 的分解得到观测 Fisher 信息，从而给出参数估计的标准误差：
+I_obs(θ) = E[−∂^2 log L_c | y] − E[s_c s_c^T | y] + E[s_c | y] E[s_c | y]^T，
+其中 L_c 为完全数据似然、s_c 为完全数据得分。
 
-$$
-\boldsymbol { E } \big ( b _ { i } \boldsymbol { b } _ { i } ^ { T } \big | y _ { i } , \delta _ { i } = \boldsymbol { k } \big ) = \widehat { b } _ { i k } \widehat { \boldsymbol { b } } _ { i k } ^ { \ T } + \widehat { \sigma } _ { b } ^ { 2 }
-$$
+该信息矩阵在本模型中呈分块结构（与混合 Logistic、均值 μ_k、方差分量与 R 等参数对应的块）。
 
-# 3.2 模型参数估计及分组
+4) 适用情景与假设小结
 
-# 3.2.2 参数估计及分组
+适用：有重复测量/纵向数据，存在“看不见的群体差异”（子组）导致个体间异质性的场景。
 
-本节中我们将随机效应 $b _ { i }$ 和潜在子组变量 $\delta _ { i }$ 看作是缺失的，将待估计参数记作𝜃且 $\theta =$ $( \gamma _ { 1 } , \gamma _ { 2 } , \gamma _ { 3 } , \mu _ { 1 } , \mu _ { 2 } , \mu _ { 3 } , \alpha , \sigma _ { \varepsilon } ^ { 2 } , \sigma _ { b } ^ { 2 } , R )$ ，则完全数据的对数似然函数
+核心假设：
 
-$$
-l ( \theta ) = \sum _ { i = 1 } ^ { N } \lbrace I ( \delta _ { i } = 1 ) l o g \pi ( U _ { i } \gamma _ { 1 } ) + I ( \delta _ { i } = 2 ) l o g \pi ( U _ { i } \gamma _ { 2 } ) + I ( \delta _ { i } = 3 ) l o g \pi ( U _ { i } \gamma _ { 3 } ) \rbrace
-$$
+随机效应在各子组为正态，均值依子组而变、方差相同；
 
-$$
-\begin{array} { l } { { + \displaystyle \sum _ { i = 1 } ^ { N } \lbrace I ( \delta _ { i } = 1 ) l o g \phi ( y _ { i } , W _ { i } \alpha + { \bf 1 } b _ { i } , \sigma _ { \varepsilon } ^ { 2 } R _ { t \times t } ) + I ( \delta _ { i } = 2 ) l o g \phi ( y _ { i } , W _ { i } \alpha + { \bf 1 } b _ { i } , \sigma _ { \varepsilon } ^ { 2 } R _ { t \times t } ) } } \\ { { + I ( \delta _ { i } = 3 ) l o g \phi ( y _ { i } , W _ { i } \alpha + { \bf 1 } b _ { i } , \sigma _ { \varepsilon } ^ { 2 } R _ { t \times t } ) \rbrace } } \\ { { + \displaystyle \sum _ { i = 1 } ^ { N } \lbrace I ( \delta _ { i } = 1 ) l o g \varphi ( b _ { i } , \mu _ { 1 } , \sigma _ { b } ^ { 2 } ) + I ( \delta _ { i } = 2 ) l o g \varphi ( b _ { i } , \mu _ { 2 } , \sigma _ { b } ^ { 2 } ) + I ( \delta _ { i } = 3 ) l o g \varphi ( b _ { i } , \mu _ { 3 } , \sigma _ { b } ^ { 2 } ) \rbrace } } \end{array}
-$$
+子组隶属概率由多项 Logistic 与 U_i 决定；
 
-其中 $\begin{array} { r } { \pi ( x ) = \frac { e ^ { x } } { \sum _ { k = 1 } ^ { 3 } e ^ { U _ { i } \gamma _ { k } } } } \end{array}$ 表示由多项逻辑回归求得的隶属各子组的概率。 $\phi ( y _ { i } , W _ { i } \alpha +$ $\mathbf { 1 } b _ { i } , \sigma _ { \varepsilon } ^ { 2 } R _ { t \times t } )$ 表示期望为 $W _ { i } \alpha + \mathbf { 1 } b _ { i }$ ，方差为 $\sigma _ { \varepsilon } ^ { 2 } R _ { t \times t }$ ， $y _ { i }$ 的多元正态分布的密度函数。$\varphi ( b _ { i } , \mu _ { k } , \sigma _ { b } ^ { 2 } )$ 表示期望为 $\mu _ { k }$ ，方差为 $\sigma _ { b } ^ { 2 }$ ， $b _ { i }$ 的一元正态分布的密度函数。 $I ( \cdot )$ 表示指示函数，其取值为 0 或 1，当指示函数中的条件判断命题成立时，指示函数取值为 1，否则为 $0$ 。对于 $I ( \delta _ { i } = 1 )$ ， $I ( \delta _ { i } = 2 )$ ， $I ( \delta _ { i } = 3 )$ 当有一个指示函数取值为 1，则另外两个指示函数为 0。
+误差为多元正态，工作相关矩阵 R 正定且对称；
 
-下面通过EM 算法求完全数据对数似然函数中的未知参数。
+b_i 与 ε_i 相互独立；
 
-E 步：给定当前的参数估计值 $\theta ^ { ( j ) }$ ，有 $\mathrm { Q } \big ( \theta , \theta ^ { ( j ) } \big ) = I _ { 1 } + I _ { 2 } + I _ { 3 }$ ，具体如下：
+数据平衡（每个体观测次数相同）。
 
-$$
-I _ { 1 } = \sum _ { i = 1 } ^ { N } \{ E ( I ( \delta _ { i } = 1 ) | y ) l o g \pi ( U _ { i } \gamma _ { 1 } ) + E ( I ( \delta _ { i } = 2 ) | y ) l o g \pi ( U _ { i } \gamma _ { 2 } ) + E ( I ( \delta _ { i } = 3 ) | ) l o g \pi ( U _ { i } \gamma _ { 3 } ) \}
-$$
+5) 符号对照（便于实现）
 
-$$
-\begin{array} { l } { { I _ { 2 } = - \displaystyle \frac { M } { 2 } l o g \sigma _ { \varepsilon } ^ { 2 } - \displaystyle \frac { N } { 2 } \log | R | } } \\ { { \displaystyle + \sum _ { i = 1 } ^ { N } \sum _ { k = 1 } ^ { 3 } - \displaystyle \frac { P ( \delta _ { i } = k | y ) } { 2 \sigma _ { \varepsilon } ^ { 2 } } ( \bigl ( y _ { i } - W _ { i } { \hat { \alpha } } - \mathbf { 1 } \hat { b } _ { i k } \bigr ) ^ { T } R ^ { - 1 } \bigl ( y _ { i } - W _ { i } { \hat { \alpha } } - \mathbf { 1 } \hat { b } _ { i k } \bigr ) + t r ( R ^ { - 1 } \mathbf { 1 } \hat { \sigma } _ { b } ^ { 2 } \mathbf { 1 } ^ { T } ) + \hat { \rho } _ { i k } \hat { \rho } _ { k } ^ { 2 } \mathbf { 1 } ^ { T } ) } } \end{array}
-$$
+i = 1..N（个体），t（每个体观测次数），p（固定效应个数）。
 
-$$
-I _ { 3 } = - \frac { N } { 2 } l o g \sigma _ { b } ^ { 2 } + \sum _ { i = 1 } ^ { N } \sum _ { k = 1 } ^ { 3 } - \frac { P ( \delta _ { i } = k | y ) } { 2 \sigma _ { b } ^ { 2 } } \Big ( \big ( \hat { b } _ { i k } - \mu _ { k } \big ) ^ { 2 } + \hat { \sigma } _ { b } ^ { 2 } \Big )
-$$
+δ_i ∈ {1,2,3}：潜在子组；U_i：用于分组概率的协变量；γ_k：子组 k 的 Logistic 系数。
 
-其中， $\begin{array} { r } { \mathbf { M } = \sum _ { i = 1 } ^ { N } t = N t ; \hat { b } _ { i k } , \hat { \sigma } _ { b } ^ { 2 } } \end{array}$ 分别表示随机效应属于第 $k$ 子组的后验均值和后验方差。
+b_i：随机效应；μ_k：子组 k 的随机效应均值；σ_b^2：随机效应方差。
 
-给定当前参数 $\theta ^ { ( j ) }$ ，对于 $i = 1 , 2 , \cdots , N$ ，令
+y_i ∈ R^t：观测向量；W_i ∈ R^{t×p}：设计矩阵；α ∈ R^p：固定效应参数。
 
-$$
-P _ { i 1 } = P \big ( \delta _ { i } = 1 \big | y _ { i } , \theta ^ { ( j ) } \big )
-$$
+ε_i ~ Normal(0, σ_ε^2 R)：误差；R：t×t 工作相关矩阵；Σ = 1 σ_b^2 1^T + σ_ε^2 R。
 
-$$
-\begin{array} { r l } & { = \frac { \pi ( U _ { i } \gamma _ { 1 } ^ { ( \beta ) } ) \phi ( y _ { i } , W _ { i } \alpha + \mu _ { 1 } ^ { ( \beta ) } , \Sigma _ { i } ^ { ( i ) } ) } { \pi ( U _ { i } \gamma _ { 1 } ^ { ( 1 ) } ) \phi ( y _ { i } , W _ { i } \alpha + \mu _ { 1 } ^ { ( \beta ) } , \Sigma _ { i } ^ { ( \beta ) } ) + \pi ( U _ { i } \gamma _ { 2 } ^ { ( 1 ) } ) \phi ( y _ { i } , W _ { i } \alpha + \mu _ { 2 } ^ { ( \beta ) } , \Sigma _ { i } ^ { ( i ) } ) + \pi ( U _ { i } \gamma _ { 3 } ^ { ( 0 ) } ) \phi ( y _ { i } , W _ { i } \alpha - \mu _ { 1 } ^ { ( \beta ) } ) } } \\ & { P _ { i 2 } = P ( \delta _ { i } = 2 | y _ { i } , \theta ^ { ( \beta ) } ) } \\ & { = \frac { \pi ( U _ { i } \gamma _ { 2 } ^ { ( \beta ) } ) \phi ( y _ { i } , W _ { i } \alpha + \mu _ { 1 } ^ { ( \beta ) } , \Sigma _ { i } ^ { ( \beta ) } ) } { \pi ( U _ { i } \gamma _ { 1 } ^ { ( 0 ) } ) \phi ( y _ { i } , W _ { i } \alpha + \mu _ { 2 } ^ { ( \beta ) } , \Sigma _ { i } ^ { ( i ) } ) + \pi ( U _ { i } \gamma _ { 3 } ^ { ( 0 ) } ) \phi ( y _ { i } , W _ { i } \alpha - \mu _ { 1 } ^ { ( \beta ) } ) } } \\ & { P _ { i 3 } = P ( \delta _ { i } = 3 | y _ { i } , \theta ^ { ( \beta ) } ) } \\ &  = \frac { \pi ( U _ { i } \gamma _ { 3 } ^ { ( \beta ) } ) \phi ( y _ { i } , W _ { i } \alpha + \mu _ { 1 } ^ { ( \beta ) } , \Sigma _ { i } ^ { ( \beta ) } ) + \pi ( U _ { i } \gamma _ { 3 } ^ { ( \beta ) } ) \phi ( y _ { i } , W _ { i } \alpha + \mu _ { 2 } ^ { ( \beta ) } , \Sigma _ { i } ^ { ( i ) } ) }  \pi ( U _ { i } \gamma _ { 1 } ^ { ( 1 ) } ) \phi ( y _ { i } , W _ { i } \alpha + \mu _ { 1 } ^ { ( \beta ) } , \Sigma _ { i } ^ { ( i ) } ) + \pi ( U _ { i } \gamma _ { 3 } ^ { ( \beta ) } ) \phi ( y _ { i } , W _ { i } \alpha + \mu _ { 2 } ^ { ( \beta ) } , \Sigma _ { i } ^  ( i \end{array}
-$$
-
-M 步： $\theta ^ { ( j + 1 ) } = a r g m a x _ { \theta } Q \big ( \theta , \theta ^ { ( j ) } \big )$
-
-（1）关于子组隶属参数 $\gamma _ { 1 }$ 、 $\gamma _ { 2 }$ 、 $\gamma _ { 3 }$ 的计算：
-
-$$
-\begin{array} { r } { \gamma _ { 1 } ^ { ( j + 1 ) } = a r g m a x _ { \gamma _ { 1 } } P _ { i 1 } l o g \pi ( U _ { i } \gamma _ { 1 } ) + P _ { i 2 } l o g \pi ( U _ { i } \gamma _ { 2 } ) + P _ { i 3 } l o g \pi ( U _ { i } \gamma _ { 3 } ) } \\ { \gamma _ { 2 } ^ { ( j + 1 ) } = a r g m a x _ { \gamma _ { 2 } } P _ { i 1 } l o g \pi ( U _ { i } \gamma _ { 1 } ) + P _ { i 2 } l o g \pi ( U _ { i } \gamma _ { 2 } ) + P _ { i 3 } l o g \pi ( U _ { i } \gamma _ { 3 } ) } \\ { \gamma _ { 3 } ^ { ( j + 1 ) } = a r g m a x _ { \gamma _ { 3 } } P _ { i 1 } l o g \pi ( U _ { i } \gamma _ { 1 } ) + P _ { i 2 } l o g \pi ( U _ { i } \gamma _ { 2 } ) + P _ { i 3 } l o g \pi ( U _ { i } \gamma _ { 3 } ) } \end{array}
-$$
-
-（2）关于子组均值参数 $\cdot \mu _ { k } ( k = 1 , 2 , 3 )$ 的计算:
-
-$$
-\mu _ { k } ^ { ( j + 1 ) } = \frac { \sum _ { i = 1 } ^ { N } P _ { i k } \hat { b } _ { i k } } { \sum _ { i = 1 } ^ { N } P _ { i k } }
-$$
-
-（3）关于参数 $\hat { \alpha }$ 的计算：
-
-$$
-\widehat { \boldsymbol { \alpha } } ^ { ( j + 1 ) } = \left( \sum _ { i = 1 } ^ { N } \sum _ { k = 1 } ^ { 3 } \boldsymbol { W _ { i } } ^ { T } \boldsymbol { R } ^ { - 1 } \boldsymbol { W _ { i } } \right) ^ { - 1 } \left( \sum _ { i = 1 } ^ { N } \sum _ { k = 1 } ^ { 3 } P _ { i k } \boldsymbol { W _ { i } } ^ { T } \boldsymbol { R } ^ { - 1 } \big ( y _ { i } - \mathbf { 1 } \widehat { b } _ { i k } \big ) \right)
-$$
-
-（4）关于参数 $\sigma _ { b } ^ { 2 }$ 、 $\sigma _ { \varepsilon } ^ { 2 }$ 的计算：
-
-$$
-\sigma _ { b } ^ { 2 } ^ { ( j + 1 ) } = \frac { 1 } { N } \sum _ { i = 1 } ^ { N } \sum _ { k = 1 } ^ { 3 } ( P _ { i k } \big ( \widehat { b } _ { i k } - \mu _ { k } \big ) ^ { 2 } + \widehat { \sigma } _ { b } ^ { 2 } )
-$$
-
-$$
-\sigma _ { \varepsilon } ^ { 2 ( j + 1 ) } = \frac { 1 } { M } \sum _ { i = 1 } ^ { N } \sum _ { k = 1 } ^ { 3 } ( P _ { i k } ( ( y _ { i } - W _ { i } \hat { \alpha } - \mathbf { 1 } \hat { b } _ { i k } ) ^ { T } R ^ { - 1 } \big ( y _ { i } - W _ { i } \hat { \alpha } - \mathbf { 1 } \hat { b } _ { i k } \big ) + t r ( R ^ { - 1 } \mathbf { 1 } \hat { \sigma } _ { b } ^ { 2 } \mathbf { 1 } ^ { T } ) )
-$$
-
-（5）关于参数 $R$ 的计算：
-
-$$
-R ^ { ( j + 1 ) } = \frac { 1 } { N \sigma _ { \mathscr { E } } ^ { 2 } } \sum _ { i = 1 } ^ { N } \sum _ { k = 1 } ^ { 3 } P _ { i k } ( \left( y _ { i } - W _ { i } \widehat { \alpha } - \mathbf { 1 } \widehat { b } _ { i k } \right) ( y _ { i } - W _ { i } \widehat { \alpha } - \mathbf { 1 } \widehat { b } _ { i k } ) ^ { T } + \mathbf { 1 } \widehat { \sigma } _ { b } ^ { 2 } \mathbf { 1 } ^ { T } )
-$$
-
-# 3.2.3 似然比检验验证多项Logistic 模型中与分组概率有关的协变量
-
-原假设（ $( \mathsf { H O } )$ ）：简化模型与完整模型在拟合观测数据上无显著差异备择假设（H1）：完整模型比简化模型对观测数据的拟合优度显著更好观测数据的对数似然函数
-
-$$
-l _ { f u l l } = \sum _ { i = 1 } ^ { N } l o g \left( \sum _ { k = 1 } ^ { 3 } \pi ( U _ { i } \gamma _ { k } ) \phi ( y _ { i } , W _ { i } \alpha + \mathbf { 1 } \mu _ { k } , \boldsymbol { \Sigma } ) \right)
-$$
-
-$$
-l _ { r e d u c e d } = \sum _ { i = 1 } ^ { N } l o g \left( \sum _ { k = 1 } ^ { 3 } \pi \big ( U ^ { * } { } _ { i } \gamma ^ { * } { } _ { k } \big ) \phi \big ( y _ { i } , W _ { i } \alpha ^ { * } + \mathbf { 1 } { \mu ^ { * } } _ { k } , { \Sigma ^ { * } } \big ) \right)
-$$
-
-检验统计量：
-
-$$
-\mathrm { L R } = 2 ( l _ { f u l l } - l _ { r e d u c e d } ) { \dot { \sim } } \chi ^ { 2 } ( d f )
-$$
-
-其中 $\begin{array} { r } { \pi ( x ) = \frac { e ^ { x } } { \sum _ { k = 1 } ^ { 3 } e ^ { U _ { i } \gamma _ { k } } } ; } \end{array}$ 表示由多项逻辑回归求得的隶属各子组的先验概率。 $\phi ( y _ { i } , W _ { i } \alpha +$ $\mathbf { 1 } \mu _ { k } , \Sigma )$ 表示期望为 $W _ { i } \alpha + \mathbf { 1 } \mu _ { k }$ ，方差为 $\boldsymbol { \Sigma } = \mathbf { 1 } \sigma _ { b } ^ { 2 } \mathbf { 1 } ^ { T } + \sigma _ { \varepsilon } ^ { 2 } R _ { t \times t }$ ， $y _ { i }$ 的多元正态分布的密度函数。$l _ { f u l l }$ 完整模型的对数似然函数， $l _ { r e d u c e d }$ 表示简化模型的对数似然函数，也就是不包含全部协变量的模型。其中， $U _ { i }$ 表示所有观测到的协变量， $\gamma _ { k } , \alpha , \mu _ { k }$ 和 $\Sigma$ 是基于 $U _ { i }$ 中包含的协变量通过 EM 算法估计的参数值； $U ^ { * } { } _ { i }$ 就表示剔除一部分协变量之后剩下的认为与分组有关的协变量， $\gamma _ { \textbf { \textit { k } } } ^ { * }$ 、 $\alpha ^ { * }$ 、 $\boldsymbol { \mu ^ { * } } _ { k }$ 和 $\Sigma ^ { * }$ 是基于 $U ^ { * } { } _ { i }$ 中包含的协变量通过 EM 算法估计的参数值。 $d f$ 表示完整模型与简化模型的协变量数量之差
-        loss = L_rec + lam1*L_deriv + lam2*L_curv + lam3*L_cons + lam4*L_T
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
+P_i k：后验隶属概率；b_hat_{ik}、var_b_hat：E 步得到的后验均值与方差。
